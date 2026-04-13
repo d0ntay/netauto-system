@@ -1,375 +1,87 @@
 # NetAuto — Network Automation Platform
 
-**A vendor-neutral, change-driven network automation system where infrastructure changes flow through a single pane of glass with built-in validation gates, audit trails, and rollback.**
+A platform that consolidates network inventory, configuration management, change control, and job execution into a single system. Engineers interact with the network exclusively through the dashboard — no direct device access, no untracked changes, no tool sprawl.
 
-> **Portfolio Note:** This is a company project documenting the system architecture and workflows. The actual codebase and infrastructure remain private.
-
-## The Problem It Solves
-
-Traditional network operations suffer from fragmentation:
-- **Manual processes:** Engineers SSH to individual devices, make changes ad-hoc
-- **Tool sprawl:** Inventory in one system, configs in another, jobs in a third
-- **Weak change gates:** No standardized approval workflow, high risk of errors
-- **Lost audit trail:** Hard to track who changed what, when, and why
-- **Slow rollback:** Reverting changes is manual and error-prone
-
-**NetAuto's solution:** All network changes flow through a single platform with mandatory validation, real-time job tracking, and automated rollback.
-
-## System Architecture
-
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                     Engineer Dashboard (React)                  │
-│  Single Pane of Glass — Devices, Inventory, Jobs, Configs      │
-└────────────────────────┬────────────────────────────────────────┘
-                         │
-                         ▼
-┌─────────────────────────────────────────────────────────────────┐
-│              FastAPI Backend (Python)                            │
-│  API aggregation layer — auth, validation, orchestration        │
-└────────┬──────────────┬──────────────┬──────────────┬───────────┘
-         │              │              │              │
-    ┌────▼──┐     ┌─────▼──┐    ┌─────▼──┐    ┌─────▼──┐
-    │ Git   │     │Nautobot│    │ Redis  │    │ AWS X  │
-    │ Repo  │     │(Inv)   │    │(Cache) │    │(Jobs)  │
-    │(SOT)  │     │        │    │        │    │        │
-    └─────┬─┘     └────┬───┘    └────┬───┘    └────┬───┘
-          │            │             │             │
-          │ OpenConfig │ Devices,    │ Job Status, │ Ansible
-          │ YAML       │ Circuits,   │ Auth, Rate  │ Tasks
-          │ Intents    │ IPAM        │ Limiting   │
-          │            │             │             │
-         ▼            ▼             ▼             ▼
-    ┌──────────────────────────────────────────────────────┐
-    │         Change Execution Pipeline                    │
-    │                                                      │
-    │  1. Config Render (Jinja2 templates)               │
-    │  2. Pre-deployment Validation (Batfish)            │
-    │  3. ServiceNow Change Gate (approval)               │
-    │  4. AWX Execution (device push via Ansible)        │
-    │  5. Post-deployment Verification (NETCONF/SSH)    │
-    │  6. Auto-rollback (on failure)                     │
-    └──────────────────────────────────────────────────────┘
-          │
-          ├─ NETCONF (Juniper devices)
-          ├─ SSH CLI (Cisco, Arista)
-          └─ gRPC (internal services)
-```
-
-## Core Workflows
-
-### 1. Device Configuration Change Workflow
-
-**Scenario:** Engineer needs to change interface MTU on a router.
-
-**Step-by-Step:**
-
-1. **Engineer Views Device** (Dashboard → Devices → Search hostname)
-   - Real-time device status pulled from Nautobot
-   - Current running config fetched via NETCONF
-   - Interface list with current MTU, status, description shown
-
-2. **Engineer Initiates Change** (Click interface → "Set MTU" action)
-   - Form opens with device-specific validation rules
-   - Pre-fills current values
-   - Validates new value against vendor constraints
-
-3. **Change Request Created** 
-   - System renders config change using Jinja2 templates
-   - Device-specific OpenConfig YAML template applied
-   - Produces configuration snippet (vendor CLI)
-
-4. **Pre-Deployment Validation**
-   - Batfish analyzes rendered config for logical errors:
-     - Route conflicts?
-     - MTU mismatches across path?
-     - Policy violations?
-   - If validation fails → change rejected with error explanation
-   - If valid → proceeds
-
-5. **ServiceNow Gate**
-   - User selects existing ServiceNow change ticket (CHG-XXXXX)
-   - System verifies ticket is approved and within change window
-   - Creates change record in audit log
-
-6. **Execution via AWX**
-   - FastAPI submits Ansible playbook to AWX with rendered config
-   - AWX connects to device (SSH/NETCONF)
-   - Applies configuration
-   - Returns job status + device output
-
-7. **Post-Deployment Verification**
-   - System pulls running config from device (NETCONF for Juniper, SSH for Cisco/Arista)
-   - Parses config using multi-vendor parser → OpenConfig model
-   - Diffs OpenConfig intent vs running config
-   - If diff = 0 → change successful, logged
-   - If diff > 0 → automatic rollback triggered
-
-8. **Rollback on Failure** (automatic)
-   - Git reverts config intent to previous version
-   - System re-renders config from reverted intent
-   - AWX executes rollback playbook
-   - Device returns to pre-change state
-   - Engineer notified with failure reason
-
-**Timeline:** 30 seconds to 2 minutes end-to-end (depends on device response time)
-
-**Audit Trail:**
-- Change request timestamp, author, ticket ID
-- Pre-change config snapshot
-- Rendered config sent to device
-- AWX job output
-- Verification result (passed/failed)
-- Rollback record (if triggered)
+> This is a company project. The architecture, workflows, and design decisions are documented here. The codebase remains private.
 
 ---
 
-### 2. Bulk Device Onboarding Workflow
+## The Problem
 
-**Scenario:** New 10-device site added to network. Need to provision all devices with base config.
+Our network operations relied on disconnected tools and manual processes:
 
-**Step-by-Step:**
+- **No inventory source of truth.** Device data lived in spreadsheets, monitoring tools, and tribal knowledge. Nobody agreed on what we had or where it was.
+- **No config source of truth.** Running configs were the only record. If someone changed something and didn't document it, it was invisible.
+- **Manual device-by-device changes.** Deploying a policy across 50 devices meant SSHing into each one individually. Slow, error-prone, inconsistent.
+- **No change audit trail.** When something broke, figuring out what changed, who changed it, and why was a forensics exercise.
+- **No config drift detection.** Devices drifted from intended state silently. We only found out when something broke.
+- **No change gates.** Anyone with credentials could make changes. No approval workflow, no validation, no rollback plan.
 
-1. **Inventory Import** (Settings → Import Devices)
-   - CSV upload: hostname, IP, device_type, site, contract
-   - System validates against naming conventions
-   - Creates devices in Nautobot inventory
-   - Assigns roles based on device_type (router, switch, firewall)
-
-2. **IPAM Allocation** (IPAM page)
-   - Allocate IP prefixes from reserved pools
-   - Assign loopback IPs, management IPs
-   - DNS entries auto-created
-   - Circuit associations added
-
-3. **Config Generation** (Config page → Generate)
-   - System renders base config for all 10 devices
-   - Uses device-specific templates (Juniper vs Cisco vs Arista)
-   - Renders interfaces, routing, OSPF, BGP based on site topology
-   - Preview diff before applying
-
-4. **Batch Change Request**
-   - One ServiceNow ticket (CHG-XXXXX) covers all 10 devices
-   - Engineer selects "bulk apply" option
-   - System creates change records for each device
-
-5. **Parallel Execution**
-   - AWX launches 10 concurrent playbooks (one per device)
-   - Each playbook:
-     - Connects to device
-     - Applies base config
-     - Verifies connectivity
-   - Progress tracked in real-time (dashboard shows % complete)
-
-6. **Verification & Rollback**
-   - For each device:
-     - Pull running config
-     - Parse to OpenConfig
-     - Verify against intent
-     - On failure: auto-rollback individual device
-   - Summary report: 9/10 successful, 1 failed (with reason)
-
-7. **Post-Onboarding**
-   - Devices appear in topology visualization
-   - Health checks run (OSPF state, BGP session status)
-   - Alerts triggered if any session down
-   - Devices ready for production
-
-**Timeline:** 5-10 minutes for 10 devices (parallel execution)
-
-**Audit Trail:** Per-device log of config, job ID, verification result, author, ticket
+NetAuto replaces all of that with a single system where every change is validated, approved, tracked, and reversible.
 
 ---
 
-### 3. Rollback Workflow
+## Architecture Overview
 
-**Scenario:** Deployed config broke routing. Need to rollback immediately.
+```
+┌──────────────────────────────────────────────────────────────────────┐
+│                          Dashboard (React)                           │
+│       The only interface engineers use to interact with the network  │
+└───────────────────────────────┬──────────────────────────────────────┘
+                                │
+                                ▼
+┌──────────────────────────────────────────────────────────────────────┐
+│                    Service Gateway (FastAPI)                          │
+│  Aggregation layer — every request flows through here                │
+│  Auth, validation, orchestration, rate limiting                      │
+└──────┬──────────┬──────────┬──────────┬──────────┬───────────────────┘
+       │          │          │          │          │
+  ┌────▼───┐ ┌───▼────┐ ┌───▼───┐ ┌───▼────┐ ┌───▼───┐
+  │Nautobot│ │  Git   │ │  AWX  │ │ SNOW   │ │ Redis │
+  │        │ │  Repo  │ │       │ │        │ │       │
+  └────────┘ └────────┘ └───────┘ └────────┘ └───────┘
+  Inventory   Config     Ansible   Change     Cache,
+  SOT         SOT        Execution Approval   Locks,
+  (devices,   (OpenConfig (playbook (ticket    Sessions
+   circuits,  YAML        runs)    validation,
+   IPAM)      intents)             work notes)
+```
 
-**Triggered By:**
-- Automatic: Post-deployment verification failed (config doesn't match intent)
-- Manual: Engineer clicks "Rollback" button
+**Two sources of truth, one gateway, everything else is orchestration.**
 
-**Automatic Rollback (Post-failure):**
-1. Verification detected mismatch (e.g., rendered config for MTU 9000 but device shows 1500)
-2. System diffs actual vs expected → mismatch confirmed
-3. Git automatically reverts config intent to previous commit
-4. Re-renders config from reverted intent
-5. AWX applies reverted config
-6. Verification confirms match
-7. Device returns to pre-change state
-8. Change marked as "ROLLED_BACK" in audit log
-
-**Manual Rollback (Emergency):**
-1. Engineer: Dashboard → Jobs → [select failed job] → "Rollback"
-2. System requires ServiceNow ticket + reason
-3. Same steps as automatic rollback
-4. Logged as manual rollback with engineer name
-
-**Safety Mechanisms:**
-- Double-failure protection: If rollback itself fails → device locked (requires manual intervention)
-- Prevents cascading failures
-- OnCall engineer notified immediately
-- All changes require ServiceNow gate (prevents accidental deploys)
-
-**Timeline:** 30-60 seconds to return device to stable state
+- **Nautobot** owns inventory: devices, interfaces, circuits, IPAM, sites.
+- **Git** owns configuration: OpenConfig YAML intent files, versioned with full commit history.
+- **Service Gateway** ties it all together. Every dashboard action goes through the gateway, which coordinates between the backend services.
 
 ---
 
-### 4. Network Inventory & IPAM Workflow
+## How It Works
 
-**Scenario:** Need IP address for new customer circuit interface.
+### The Service Gateway
 
-**Step-by-Step:**
+The FastAPI service gateway is the central nervous system. It doesn't store data — it aggregates and orchestrates across all backend services through a single API surface.
 
-1. **View Inventory** (Dashboard → Inventory)
-   - See all sites, devices, circuits, contracts
-   - Real-time sync with Nautobot
+**What it handles:**
 
-2. **Allocate IP Address** (IPAM page)
-   - Select site and subnet
-   - Drag-and-drop IP allocation (visual IPAM)
-   - Assign to device interface
-   - Circuit data links IP to service contract
-
-3. **Config Auto-Generation**
-   - System detects new IP allocation
-   - Auto-updates interface config intent
-   - Renders new interface config
-   - Awaiting engineer approval
-
-4. **Engineer Approves & Deploys**
-   - Review rendered config change
-   - Attach ServiceNow change ticket
-   - Deploy via dashboard (AWX executes)
-   - Verification confirms IP is operational
-
-**Why This Matters:**
-- IPAM is source of truth for addressing
-- Config intents auto-generate from IPAM changes
-- No manual config writing for interface IPs
-- Eliminates duplicate IPs and address conflicts
+| Domain | What the Gateway Does |
+|--------|----------------------|
+| **Devices** | Queries Nautobot GraphQL for device inventory. Normalizes vendor names, formats interface data, exposes search and filtering. |
+| **Configuration** | Reads/writes OpenConfig YAML intents to Git. Renders intents to vendor CLI using Jinja2 templates. Submits rendered configs to AWX for deployment. |
+| **Change Execution** | Orchestrates the full change pipeline: lock device → commit intent → render config → push via AWX → verify → rollback on failure. |
+| **Verification** | Pulls running config from devices via NETCONF or SSH, parses it to OpenConfig, diffs against the Git intent. |
+| **Drift Detection** | Compares intended config (Git) against actual running config (device) on demand or in bulk. Caches results per device. |
+| **Job Tracking** | Fetches AWX job history, applies filters, auto-tags jobs based on ticket type and action. |
+| **ServiceNow** | Validates that a change ticket exists and is approved before allowing any change. Records results as work notes on the ticket after execution. |
+| **Auth** | JWT-based authentication with 4-tier role-based access control. Rate-limited login, token blocklist, refresh rotation. |
+| **Circuits & IPAM** | Proxies CRUD operations to Nautobot for circuit, prefix, VLAN, and IP address management. All mutations require a validated ServiceNow ticket. |
+| **Topology** | Queries Nautobot for sites, devices, interfaces, and circuits, then formats the data for D3.js network graph rendering. |
 
 ---
 
-### 5. Job Tracking & Monitoring Workflow
+### Config Intent Model
 
-**Scenario:** Engineer deploys config across 50-device site. Needs real-time visibility.
+Configuration is managed as **vendor-neutral OpenConfig YAML intents**, stored in Git.
 
-**Dashboard Experience:**
-
-1. **Batch Job Submitted**
-   - Engineer: Config page → "Apply to all devices" → selects site
-   - System submits 50 parallel AWX jobs
-   - Dashboard shows: Job ID, site, device count, status
-
-2. **Real-Time Polling**
-   - Dashboard polls job status every 5 seconds
-   - Shows:
-     - **Pending:** Waiting for AWX
-     - **Running:** N/50 devices completed
-     - **Verifying:** Post-deployment validation in progress
-     - **Success:** Device config matches intent
-     - **Failed:** Device verification failed, rollback triggered
-
-3. **Drill-Down**
-   - Click device in list → see:
-     - AWX job output (command-by-command)
-     - Pre-change config snapshot
-     - Rendered config applied
-     - Verification result
-     - Diff (if mismatch)
-
-4. **Alerts**
-   - Failure notification (Slack/email)
-   - Automatic rollback notification
-   - Time threshold alerts (job taking too long)
-
-5. **Historical Tracking**
-   - Jobs page shows all changes over past 90 days
-   - Filter by status (success, failed, rolled back)
-   - Filter by engineer, device, site, ticket
-   - Export audit trail for compliance
-
-**Key Metrics Visible:**
-- Success rate (49/50 devices)
-- Average deployment time (3m 22s)
-- Failure details with root cause (e.g., "device unreachable")
-- Rollback triggers (auto vs manual)
-
----
-
-## Multi-Vendor Support
-
-The system abstracts vendor differences through layered architecture:
-
-### Layer 1: Config Intents (Vendor-Neutral)
-```yaml
-# intents/vtx/smke-vtx-pe1-r/openconfig-interfaces.yaml
-interfaces:
-  - name: ge-0/0/0
-    enabled: true
-    mtu: 9192
-    description: "Link to SMKE-VTX-PE2"
-```
-
-### Layer 2: Vendor-Specific Templates (Jinja2)
-```jinja2
-{# templates/juniper/openconfig-interfaces.j2 #}
-set interfaces {{ interface.name }} mtu {{ interface.mtu }}
-set interfaces {{ interface.name }} description "{{ interface.description }}"
-set interfaces {{ interface.name }} unit 0 family inet address {{ interface.ipv4 }}/24
-```
-
-### Layer 3: Device Connection (NETCONF/SSH)
-```
-Juniper → NETCONF (structured, validation included)
-Cisco/Arista → SSH CLI (unstructured, raw CLI)
-```
-
-### Layer 4: Verification (Unified Parser)
-```
-Device output → Multi-vendor parser → OpenConfig model → Diff against intent
-```
-
-**Result:** Same workflow for all vendors. Vendor-specific logic isolated to templates and parser.
-
----
-
-## Change Control Gates
-
-Every change must pass these gates before reaching devices:
-
-### Gate 1: Config Validation
-- Syntax validation (template rendering succeeds)
-- Logical validation (Batfish analysis)
-- Policy compliance checks
-- **Failure:** Change rejected with explanation
-
-### Gate 2: ServiceNow Integration
-- Engineer selects existing CHG ticket
-- System verifies:
-  - Ticket is approved
-  - Change window is open
-  - Ticket owner matches engineer
-- **Failure:** Change blocked until approved in ServiceNow
-
-### Gate 3: Post-Deployment Verification
-- Rendered config matches device running config
-- No config drift post-change
-- **Failure:** Automatic rollback
-
-### Gate 4: Role-Based Authorization
-- 4 role tiers determine who can deploy where
-  - **NOC Tier 1:** Read-only (monitor only)
-  - **NOC Tier 2:** Can view configs, approve changes
-  - **Engineer:** Can deploy to production (requires CHG ticket)
-  - **Manager:** Admin access (rare)
-
----
-
-## Data Sources & Integrations
-
-### Source of Truth #1: Git Repository
 ```
 intents/
 ├── vtx/
@@ -378,177 +90,282 @@ intents/
 │   │   ├── openconfig-routing.yaml
 │   │   └── openconfig-bgp.yaml
 │   └── smke-vtx-pe2-r/
+│       └── ...
 ├── maglev/
 └── xlink/
 ```
-- **Single source of truth for configs**
-- Immutable commit history (audit trail)
-- Git revert = automatic rollback
-- Config diffs show exactly what changed
 
-### Source of Truth #2: Nautobot (Inventory API)
-- Devices (hostname, IP, device_type, site, contract)
-- Interfaces (name, speed, enabled status)
-- Circuits (provider, service type, bandwidth, costs)
-- IPAM (prefixes, individual IPs, DNS)
-- Real-time sync (updates push to Redis cache)
+Each device has its own directory under its contract. Intent files describe the desired state of the device in OpenConfig format:
 
-### Integration #3: ServiceNow (Change Gate)
-- Change request lookup (CHG tickets)
-- Approval status verification
-- Change window validation
-- Audit integration (change records)
+```yaml
+# intents/vtx/smke-vtx-pe1-r/openconfig-interfaces.yaml
+device: smke-vtx-pe1-r
+vendor: juniper
+model: interfaces
+interfaces:
+  - name: ge-0/0/0
+    enabled: true
+    mtu: 9192
+    description: "Link to SMKE-VTX-PE2"
+```
 
-### Integration #4: AWS X / Ansible AWX (Execution)
-- Job queue (submits playbooks)
-- Multi-vendor playbook support
-- SSH key management
-- Job history + output storage
-- Status polling (live job tracking)
+When an engineer makes a change through the dashboard, the gateway:
+1. Updates the relevant intent file in Git (merging the changed interface into the existing file)
+2. Renders the intent to vendor-specific CLI using Jinja2 templates
+3. Pushes the rendered config to the device via Ansible
 
-### Integration #5: Redis (Cache & Queue)
-- Device inventory cache (updates every 5 min)
-- Job status queue (real-time polling)
-- Session tokens (auth)
-- Rate limiting (API throttling)
+**Why Git?**
+- Every change is a commit with author, timestamp, ticket number, and description
+- Rollback is a `git revert` — restore any previous state instantly
+- Diff any two points in time to see exactly what changed
+- Full history of every config change ever made to every device
 
 ---
 
-## Why This Architecture
+### Multi-Vendor Abstraction
 
-### 1. **Separation of Concerns**
-- **Git:** Config intent storage
-- **Nautobot:** Inventory/IPAM
-- **AWX:** Job execution
-- **FastAPI:** Orchestration glue
-- **Redis:** Caching + session management
+The system supports Juniper, Cisco, and Arista through a layered abstraction:
 
-Each tool does one thing well. No monolith.
+**Layer 1 — Intent (vendor-neutral):** OpenConfig YAML describes desired state. Same format regardless of vendor.
 
-### 2. **Auditability**
-Every change produces:
-- Git commit (config intent)
-- ServiceNow record (approval)
-- AWX job output (what was executed)
-- Verification log (success/failure)
-- Rollback record (if triggered)
+**Layer 2 — Rendering (vendor-specific):** Jinja2 templates at `templates/{vendor}/openconfig-{model}.j2` translate intents into vendor CLI. Adding a new vendor means writing new templates — the rest of the pipeline stays the same.
 
-**90-day retention** for compliance.
+**Layer 3 — Transport (vendor-specific):**
+- Juniper → NETCONF (port 830, structured XML)
+- Cisco → SSH CLI
+- Arista → SSH CLI
 
-### 3. **Safety**
-- **Mandatory change gates** (ServiceNow approval required)
-- **Pre-deployment validation** (Batfish checks logic)
-- **Post-deployment verification** (confirm change worked)
-- **Automatic rollback** (on failure)
-- **Device locks** (double-failure protection)
-
-### 4. **Multi-Vendor Abstraction**
-- Juniper, Cisco, Arista all use same workflow
-- Vendor logic isolated to templates + parser
-- Engineer doesn't need to know CLI syntax
-- Easy to add new vendors (template + parser module)
-
-### 5. **Scalability**
-- Parallel job execution (AWX runs N devices simultaneously)
-- Redis caching reduces Nautobot load
-- Config rendering is stateless (scales horizontally)
-- Batch operations (50+ devices in single change)
+**Layer 4 — Parsing (vendor-specific):** A custom multi-vendor config parser reads running configs and normalizes them back to OpenConfig format. This is what makes verification possible — we can diff the intent against the actual device state in a common format.
 
 ---
 
-## Engineer Experience
+### The Change Pipeline
 
-### What Engineers Can Do (via Dashboard)
+Every configuration change follows the same pipeline. No shortcuts, no exceptions.
 
-✅ **View** — Real-time device status, running configs, interface state  
-✅ **Search** — Find devices by hostname, IP, site, contract  
-✅ **Modify** — MTU, description, speed, duplex, enable/disable  
-✅ **Track** — Real-time job progress, 90-day history  
-✅ **Rollback** — One-click rollback (if change fails)  
-✅ **Audit** — See who changed what, when, why (ServiceNow ticket)  
+```
+Engineer initiates change in dashboard
+        │
+        ▼
+┌─ Gate 1: ServiceNow Validation ──────────────────────────┐
+│  Is there an approved ticket (INC/CHG) for this change?  │
+│  Is the change window open?                               │
+│  NO → Change blocked                                      │
+└──────────────────────────┬───────────────────────────────┘
+                           │ YES
+                           ▼
+┌─ Gate 2: Device Lock ────────────────────────────────────┐
+│  Acquire Redis lock on target device (600s TTL)          │
+│  Prevents concurrent changes to same device              │
+│  LOCKED → Change rejected (device in use by another      │
+│           ticket)                                         │
+└──────────────────────────┬───────────────────────────────┘
+                           │ ACQUIRED
+                           ▼
+┌─ Step 3: Commit Intent to Git ───────────────────────────┐
+│  Merge interface changes into device intent file         │
+│  Commit with ticket number + change description          │
+└──────────────────────────┬───────────────────────────────┘
+                           │
+                           ▼
+┌─ Step 4: Render Config ──────────────────────────────────┐
+│  Load Jinja2 template for vendor + model                 │
+│  Render OpenConfig intent → vendor CLI commands          │
+└──────────────────────────┬───────────────────────────────┘
+                           │
+                           ▼
+┌─ Step 5: Execute via AWX ────────────────────────────────┐
+│  Submit Ansible playbook with rendered config            │
+│  AWX connects to device (SSH/NETCONF)                    │
+│  Applies configuration                                    │
+│  Gateway polls job status (5s intervals, 10 min timeout) │
+└──────────────────────────┬───────────────────────────────┘
+                           │
+                           ▼
+┌─ Gate 6: Post-Change Verification ───────────────────────┐
+│  Pull running config from device (NETCONF or SSH)        │
+│  Parse running config → OpenConfig (custom parser)       │
+│  Diff running config vs Git intent                       │
+│                                                           │
+│  MATCH → Success. Record result to SNOW work notes.      │
+│          Release device lock.                             │
+│                                                           │
+│  MISMATCH → Automatic rollback triggered                 │
+│     1. Git reverts intent to previous commit             │
+│     2. Re-render config from reverted intent             │
+│     3. AWX pushes reverted config to device              │
+│     4. If rollback succeeds → device restored            │
+│     5. If rollback ALSO fails → permanent device lock    │
+│        (requires manual intervention)                     │
+└──────────────────────────────────────────────────────────┘
+```
 
-### What Engineers Cannot Do
-
-❌ SSH to devices (no CLI access)  
-❌ Bypass change gates (ServiceNow required)  
-❌ Make untracked changes (all changes audited)  
-❌ Manually edit configs (only via dashboard workflows)  
-❌ Deploy without approval (role-based gates)  
-
-**Result:** Reduced risk, full visibility, complete audit trail.
-
----
-
-## System Metrics & Observability
-
-### Operational KPIs
-
-| Metric | Target | Current |
-|--------|--------|---------|
-| Change Success Rate | 99%+ | 98.7% |
-| Time to Deploy (single device) | < 5 min | 2-3 min |
-| Time to Deploy (50 devices) | < 15 min | 8-12 min |
-| Automatic Rollback Rate | < 1% | 0.3% |
-| Manual Rollback Time | < 60 sec | 30-45 sec |
-| Job Status Poll Accuracy | 100% | 99.8% |
-
-### Infrastructure Scale
-
-- **Device Inventory:** 500+ devices
-- **Daily Changes:** 50-100 config changes
-- **Concurrent Jobs:** 20-50 parallel AWX playbooks
-- **Job Queue Latency:** < 2 seconds
-- **Verification Latency:** < 5 seconds per device
-
----
-
-## Why This Approach Works for Network Teams
-
-### Before (Manual)
-- Engineer SSHes to device
-- Edits config in editor
-- Applies change manually
-- Documents change in separate ticket system
-- Rollback is manual copy-paste
-
-**Problems:** Inconsistent, error-prone, slow rollback, weak audit
-
-### After (NetAuto)
-- Engineer uses dashboard
-- System renders config from intent
-- Change validated (Batfish)
-- Approval gated (ServiceNow)
-- Auto-executed (AWX)
-- Auto-verified (NETCONF/SSH)
-- Auto-rolled-back (on failure)
-- Full audit trail (Git + ServiceNow)
-
-**Benefits:** Consistent, safe, fast, auditable, scalable
+**Every step produces an audit record:** Git commit, AWX job output, verification result, SNOW work note. If something goes wrong six months from now, we can trace exactly what happened.
 
 ---
 
-## Technical Principles
+### ServiceNow Integration
 
-1. **Intent-Driven:** Config intents are source of truth, not running configs
-2. **Vendor-Neutral:** OpenConfig abstracts vendor differences
-3. **Immutable History:** Git as audit log (config + who + when + why)
-4. **Gate Everything:** Validation + approval + verification + rollback
-5. **Fail Safe:** Auto-rollback prevents extended outages
-6. **Full Visibility:** Real-time job tracking + 90-day audit trail
+ServiceNow is the approval gate. No change goes through without a validated ticket.
 
----
+**Before a change executes, the gateway:**
+1. Takes the ticket number the engineer provides (INC-XXXXX or CHG-XXXXX)
+2. Authenticates to ServiceNow via OAuth 2.0
+3. Queries the ticket table to verify it exists, is approved, and the change window is active
+4. If validation fails, the change is blocked
 
-## What This Demonstrates
+**After a change executes, the gateway:**
+1. Writes the result (success, failure, rollback) as a work note on the ServiceNow ticket
+2. Includes the job ID, device name, and verification outcome
 
-✅ **Network Automation Architecture** — End-to-end system design  
-✅ **Change Management** — Approval gates, verification, rollback  
-✅ **Multi-Vendor Support** — Abstraction layer (OpenConfig)  
-✅ **Real-Time Operations** — Job tracking, auto-refresh, alerts  
-✅ **Audit & Compliance** — 90-day history, change gates, approval tracking  
-✅ **Infrastructure as Code** — Git-driven configuration  
-✅ **Risk Mitigation** — Validation, verification, automatic rollback  
-✅ **Scalability** — Parallel execution, caching, stateless design  
+This means the ServiceNow ticket becomes a complete record of what was requested, approved, executed, and verified — without anyone manually updating it.
 
 ---
 
-**Summary:** A production network automation platform that replaced manual device configuration with a validated, auditable, vendor-neutral change control system. Every change flows through multiple safety gates, executes in parallel, verifies automatically, and rolls back on failure. Designed to scale from 50 to 500+ devices with full audit trail.
+### Drift Detection
+
+Config drift is when a device's running config doesn't match its intended state. This happens when someone makes an out-of-band change, a device reloads with a different config, or a change partially fails.
+
+**How drift detection works:**
+1. Read the device's intended config from Git (OpenConfig YAML)
+2. Pull the device's actual running config (NETCONF for Juniper, SSH for Cisco/Arista)
+3. Parse the running config through the multi-vendor parser → normalize to OpenConfig
+4. Diff the intent against the parsed running config
+5. Report: CLEAN (matches), DRIFTED (differences found), UNKNOWN (no intent file), or ERROR
+
+**The diff is field-level:** It doesn't just say "these configs are different" — it reports exactly which interfaces, which fields (MTU, description, enabled state), what the expected value is, and what the actual value is.
+
+Drift checks can run on-demand for a single device or in bulk across the entire inventory with bounded concurrency.
+
+---
+
+### Verification vs Drift Detection
+
+These use the same underlying logic but serve different purposes:
+
+- **Verification** runs immediately after a change is pushed. It confirms the change was applied correctly. If it fails, automatic rollback is triggered.
+- **Drift detection** runs independently. It checks whether devices have drifted from their intended state over time. It reports but doesn't auto-remediate.
+
+Both use the same `pull_and_verify()` function: pull running config → parse to OpenConfig → diff against intent.
+
+---
+
+### Device Locking
+
+The gateway uses Redis-based mutual exclusion to prevent concurrent changes to the same device.
+
+**Two lock tiers:**
+
+1. **Standard lock** (TTL 600 seconds): Acquired when a change starts, released when it completes. Prevents two engineers from changing the same device simultaneously. The lock value is the ticket number, so if a lock is held, the error message tells you which ticket is using the device.
+
+2. **Permanent lock** (no TTL): Triggered when a rollback fails — meaning both the original change AND the rollback attempt failed. The device is locked until someone manually investigates and releases it. This prevents cascading failures.
+
+---
+
+### Rollback
+
+Rollback can be triggered automatically or manually.
+
+**Automatic rollback** fires when post-change verification detects a mismatch between the intent and the running config. The gateway:
+1. Checks that prior Git state exists for the device
+2. Reverts the Git commit (creating a new "ROLLBACK" commit)
+3. Re-renders config from the reverted intent
+4. Pushes the reverted config via AWX
+5. If the rollback job fails → permanent device lock
+
+**Manual rollback** is available to engineers through the dashboard. It follows the same steps but requires a ServiceNow ticket and a reason.
+
+**The key insight:** Because Git is the config source of truth and every change is a commit, rollback is just "revert to the previous commit and re-render." No manual config reconstruction.
+
+---
+
+### Role-Based Access Control
+
+Four roles with hierarchical permissions:
+
+| Role | Can Do |
+|------|--------|
+| **NOC Tier 1** | View dashboard, devices, jobs, alerts. Read-only. |
+| **NOC Tier 2** | Everything above + execute simple operational actions (interface bounce). |
+| **Engineer** | Everything above + submit config changes, rollback, manage inventory (IPAM, circuits, devices), view running configs. |
+| **Manager** | Everything above + approve engineer-level changes, override workflows. |
+
+**How it's enforced:** Every API endpoint declares a minimum role. The auth middleware extracts the JWT, checks the user's role rank, and rejects requests that don't meet the threshold. The dashboard dynamically shows/hides navigation sections based on the user's role.
+
+**Auth details:**
+- JWT access tokens (15 min expiry) + HTTP-only refresh token cookies (7 day expiry)
+- Bcrypt password hashing
+- Rate-limited login (5 attempts per minute per username, enforced via Redis)
+- Token blocklist for logout (Redis TTL matches remaining token life)
+
+---
+
+### Job Tracking & Auto-Tagging
+
+Every Ansible job submitted through AWX is tracked and queryable through the dashboard.
+
+**What engineers see:**
+- Job history with status (queued, running, successful, failed)
+- Filtering by status, vendor, device, action type, date range
+- Full job stdout (command-by-command output from the device)
+- Tags for categorization
+
+**Auto-tagging:** When jobs are fetched, the gateway automatically derives tags from the job data:
+- Ticket prefix → tag: `INC*` becomes "incident-driven", `CHG*` becomes "cr-driven", no ticket becomes "manual"
+- Action type → tag: `set_description` becomes "set-description", `bounce_interface` becomes "bounce-interface"
+
+Tags are stored in PostgreSQL. Auto-tags are read-only (can't be modified or deleted). Engineers can also create and assign manual tags for their own categorization.
+
+---
+
+## Services Summary
+
+| Service | Custom or Off-the-Shelf | Purpose |
+|---------|------------------------|---------|
+| **Service Gateway (FastAPI)** | Custom | API aggregation, auth, orchestration, change pipeline |
+| **Dashboard (React)** | Custom | Engineer-facing UI, single pane of glass |
+| **Change Engine** | Custom | Orchestrates lock → commit → render → push → verify → rollback |
+| **Drift Service** | Custom | Compares Git intents vs running configs, reports drift |
+| **Verification Service** | Custom | Post-change config validation, triggers rollback on failure |
+| **Config Parser** | Custom | Multi-vendor config → OpenConfig normalization |
+| **Template Renderer** | Custom | OpenConfig YAML → vendor CLI via Jinja2 |
+| **Git Client** | Custom | Intent CRUD, merge logic, revert for rollback |
+| **Device Lock Service** | Custom | Redis-based mutual exclusion with permanent escalation |
+| **ServiceNow Client** | Custom | OAuth ticket validation, work note recording |
+| **NETCONF Client** | Custom | Async config pull for Juniper, Cisco, Arista |
+| **Auth System** | Custom | JWT, RBAC, rate limiting, token lifecycle |
+| **Auto-Tagger** | Custom | Derives job tags from ticket prefix + action type |
+| **Nautobot** | Off-the-shelf | Inventory source of truth (API-only, no UI exposed) |
+| **Ansible AWX** | Off-the-shelf | Job execution engine (runs playbooks on devices) |
+| **Redis** | Off-the-shelf | Caching, device locks, auth tokens, rate limiting |
+| **PostgreSQL** | Off-the-shelf | Auth database (users, tags, saved filters) |
+| **ServiceNow** | Off-the-shelf (company instance) | Change approval and audit |
+
+---
+
+## Tech Stack
+
+| Layer | Technology |
+|-------|-----------|
+| Frontend | React 19, TypeScript, Vite, Tailwind CSS, D3.js, TanStack Query |
+| Service Gateway | Python, FastAPI, async httpx, Pydantic |
+| Config Management | Git (GitPython), Jinja2, OpenConfig YAML |
+| Device Communication | NETCONF (ncclient), SSH (Paramiko/Netmiko), Ansible |
+| Inventory | Nautobot 3.x (GraphQL + REST API) |
+| Job Execution | Ansible AWX |
+| Change Approval | ServiceNow (OAuth 2.0 REST API) |
+| Auth | JWT (PyJWT), bcrypt, Redis (token store + blocklist) |
+| Database | PostgreSQL (users, tags, filters), Redis (cache, locks, sessions) |
+| Infrastructure | Kubernetes (k3s), Docker, Nginx |
+
+---
+
+## What This Project Demonstrates
+
+- **End-to-end network automation architecture** — from intent to device, with validation at every step
+- **Custom service development** — 13 custom services built to solve specific operational problems
+- **Multi-vendor abstraction** — single workflow for Juniper, Cisco, and Arista through OpenConfig and templating
+- **Change control discipline** — mandatory approval gates, post-change verification, automatic rollback
+- **Infrastructure as Code** — Git as the config source of truth with full commit history
+- **System integration** — coordinating Nautobot, AWX, ServiceNow, Git, Redis, and PostgreSQL through a unified API
+- **Operational thinking** — drift detection, device locking, double-failure protection, audit trails

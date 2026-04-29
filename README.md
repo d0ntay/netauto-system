@@ -1,4 +1,4 @@
-# Nauto
+# Netauto
 
 A network automation platform for a multivendor service provider, built around Nautobot as the source of truth and orchestration hub. Unifies network inventory, config management, and workflow automation behind a single API gateway and dashboard.
 
